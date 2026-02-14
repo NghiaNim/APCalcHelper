@@ -1,0 +1,5 @@
+{
+	"editor.defaultFormatter": "biomejs.biome",
+	"editor.formatOnSave": true,
+	"biome.lsp.bin": "./ap-calc-helper/node_modules/@biomejs/cli-darwin-arm64/biome"
+}

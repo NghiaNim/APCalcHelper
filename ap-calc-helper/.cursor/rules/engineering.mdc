@@ -1,0 +1,38 @@
+---
+description: Core engineering rules for AP Calc Helper
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# AP Calc Helper Engineering Rules
+
+## Simplicity First
+
+- Keep architecture minimal and explicit.
+- Prefer straightforward code over clever abstractions.
+- Add layers only when they remove repeated complexity.
+
+## Organization
+
+- Follow T3 conventions and directory structure.
+- Keep shared logic in reusable modules to avoid duplication.
+- `README.md` is the product and architecture doc. `PROGRESS.md` tracks what is built and what is next. Update both when shipping features.
+
+## Strong Typing
+
+- Use TypeScript types for all public interfaces, function signatures, and API contracts.
+- Never use `any`.
+- Validate all external input with Zod.
+
+## OOP Boundaries (When Useful)
+
+- Model core domain concepts (student profile, learning session, misconception signal) as clear entities.
+- Keep domain logic in focused services or modules with explicit responsibilities.
+- Avoid deep inheritance trees; prefer composition.
+
+## Code Style
+
+- Keep files concise and focused on one concern.
+- Use descriptive names and small functions.
+- Avoid verbose comments; only explain non-obvious decisions.
