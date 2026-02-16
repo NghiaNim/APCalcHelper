@@ -25,6 +25,16 @@ alwaysApply: true
 - Never use `any`.
 - Validate all external input with Zod.
 
+## React: No useEffect
+
+- Never use `useEffect`. There is always a better pattern:
+  - **Derived state**: compute during render, not in an effect.
+  - **Event handlers**: all API calls and state transitions happen in response to user actions.
+  - **`useSyncExternalStore`**: for subscriptions to external state (timers, stores, browser APIs).
+  - **Ref guards during render + `setTimeout`**: for one-time initialization (replaces mount effects).
+  - **Explicit calls in handlers**: for DOM manipulation like scrolling (not in effects).
+- If you think you need useEffect, reconsider the data flow first.
+
 ## OOP Boundaries (When Useful)
 
 - Model core domain concepts (student profile, learning session, misconception signal) as clear entities.

@@ -23,6 +23,7 @@ export const tutorRouter = createTRPCRouter({
 				phase: z.enum(["diagnostic", "teaching"]),
 				conversationHistory: z.array(messageSchema),
 				misconceptions: z.array(z.string()).default([]),
+				eloScore: z.number().int().nullable().default(null),
 			}),
 		)
 		.mutation(async ({ input }) => {
@@ -37,7 +38,7 @@ export const tutorRouter = createTRPCRouter({
 			const systemPrompt =
 				input.phase === "diagnostic"
 					? buildDiagnosticPrompt(section)
-					: buildTeachingPrompt(section, input.misconceptions);
+					: buildTeachingPrompt(section, input.misconceptions, input.eloScore);
 
 			const result = await chatWithTutor(
 				systemPrompt,

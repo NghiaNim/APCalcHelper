@@ -28,6 +28,15 @@ export const tutorResponseSchema = z.object({
 	misconceptionNotes: z
 		.array(z.string())
 		.describe("Observed reasoning gaps — empty array if none"),
+	eloScore: z
+		.number()
+		.int()
+		.min(400)
+		.max(2400)
+		.nullable()
+		.describe(
+			"ELO rating 400-2400 assigned ONLY when diagnosticComplete is true. null otherwise.",
+		),
 });
 
 export type TutorResponse = z.infer<typeof tutorResponseSchema>;

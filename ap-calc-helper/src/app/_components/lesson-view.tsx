@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { buildGreeting } from "@/features/ap-calculus-bc/prompts";
 import type { APCalcBCSection } from "@/features/ap-calculus-bc/syllabus";
 import { api } from "@/trpc/react";
@@ -18,11 +18,32 @@ type Message = {
 
 type HistoryEntry = { role: "tutor" | "student"; content: string };
 
-type LessonPhase = "diagnostic" | "teaching";
+type LessonPhase = "diagnostic" | "elo-reveal" | "teaching";
+
+const DIAGNOSTIC_LIMIT_MS = 5 * 60 * 1000;
+
+// ---------- Countdown via useSyncExternalStore ----------
+
+function subscribeToTick(cb: () => void) {
+	const id = setInterval(cb, 1000);
+	return () => clearInterval(id);
+}
+
+function useCountdown(deadlineMs: number | null): number {
+	const snap = () => {
+		if (deadlineMs === null) return -1;
+		return Math.max(0, Math.ceil((deadlineMs - Date.now()) / 1000));
+	};
+	return useSyncExternalStore(subscribeToTick, snap, snap);
+}
 
 // ---------- Helpers ----------
 
 let idSeq = 0;
+function nextId() {
+	idSeq += 1;
+	return idSeq;
+}
 
 function playBase64Audio(base64: string) {
 	const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
@@ -31,38 +52,68 @@ function playBase64Audio(base64: string) {
 	audio.play().catch(() => {});
 }
 
+function formatTime(s: number): string {
+	const m = Math.floor(s / 60);
+	const sec = s % 60;
+	return `${m}:${sec.toString().padStart(2, "0")}`;
+}
+
+function eloLabel(elo: number): string {
+	if (elo < 800) return "Building Foundations";
+	if (elo < 1200) return "Developing";
+	if (elo < 1600) return "Proficient";
+	if (elo < 2000) return "Advanced";
+	return "Near-Mastery";
+}
+
+function toHistory(msgs: Message[]): HistoryEntry[] {
+	return msgs.map((m) => ({ role: m.role, content: m.text }));
+}
+
+function scrollToBottom(ref: React.RefObject<HTMLDivElement | null>) {
+	requestAnimationFrame(() => {
+		ref.current?.scrollIntoView({ behavior: "smooth" });
+	});
+}
+
 // ---------- Component ----------
 
 export function LessonView({ section }: { section: APCalcBCSection }) {
 	const [phase, setPhase] = useState<LessonPhase>("diagnostic");
-	const [messages, setMessages] = useState<Message[]>([]);
+	const [messages, setMessages] = useState<Message[]>(() => [
+		{ id: nextId(), role: "tutor", text: buildGreeting(section), math: [] },
+	]);
 	const [input, setInput] = useState("");
 	const [pending, setPending] = useState<string | null>(null);
 	const [misconceptions, setMisconceptions] = useState<string[]>([]);
+	const [eloScore, setEloScore] = useState<number | null>(null);
 	const [busy, setBusy] = useState(false);
+
+	const [deadline] = useState(() => Date.now() + DIAGNOSTIC_LIMIT_MS);
+	const secondsLeft = useCountdown(phase === "diagnostic" ? deadline : null);
+
 	const bottomRef = useRef<HTMLDivElement>(null);
 	const didInit = useRef(false);
+	const didTimeUp = useRef(false);
 
 	const chatMutation = api.tutor.chat.useMutation();
 
-	// Auto-scroll
-	useEffect(() => {
-		bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-	});
+	// ---- Core: send a request and process the response ----
 
 	async function ask(p: LessonPhase, history: HistoryEntry[], gaps: string[]) {
 		setBusy(true);
+		scrollToBottom(bottomRef);
 		try {
 			const res = await chatMutation.mutateAsync({
 				sectionId: section.id,
-				phase: p,
+				phase: p === "diagnostic" ? "diagnostic" : "teaching",
 				conversationHistory: history,
 				misconceptions: gaps,
+				eloScore,
 			});
 
-			idSeq += 1;
 			const tutorMsg: Message = {
-				id: idSeq,
+				id: nextId(),
 				role: "tutor",
 				text: res.spokenText,
 				math: res.displayMath,
@@ -73,36 +124,52 @@ export function LessonView({ section }: { section: APCalcBCSection }) {
 				setMisconceptions((prev) => [...prev, ...res.misconceptionNotes]);
 			}
 			if (res.diagnosticComplete && p === "diagnostic") {
-				setPhase("teaching");
+				setEloScore(res.eloScore ?? 1000);
+				setPhase("elo-reveal");
 			}
 			if (res.audioBase64) {
 				playBase64Audio(res.audioBase64);
 			}
 		} finally {
 			setBusy(false);
+			scrollToBottom(bottomRef);
 		}
 	}
 
-	// Show greeting instantly, then fetch first question
-	// biome-ignore lint/correctness/useExhaustiveDependencies: intentional one-time init
-	useEffect(() => {
-		if (didInit.current) return;
+	// ---- One-time init: ref guard during render, deferred side effect ----
+
+	if (!didInit.current) {
 		didInit.current = true;
+		const greetingHistory = toHistory(messages);
+		setTimeout(() => ask("diagnostic", greetingHistory, []), 0);
+	}
 
-		const greeting = buildGreeting(section);
-		idSeq += 1;
-		const greetingMsg: Message = {
-			id: idSeq,
-			role: "tutor",
-			text: greeting,
-			math: [],
-		};
-		setMessages([greetingMsg]);
+	// ---- Time-up: ref guard during render, deferred side effect ----
 
-		// Include greeting in history so AI knows context
-		const history: HistoryEntry[] = [{ role: "tutor", content: greeting }];
-		void ask("diagnostic", history, []);
-	}, []);
+	if (
+		secondsLeft === 0 &&
+		phase === "diagnostic" &&
+		!didTimeUp.current &&
+		!busy
+	) {
+		didTimeUp.current = true;
+		setTimeout(() => {
+			const timeUpMsg: Message = {
+				id: nextId(),
+				role: "student",
+				text: "Time is up — please wrap up the diagnostic.",
+				math: [],
+			};
+			setPending(null);
+			setMessages((prev) => {
+				const next = [...prev, timeUpMsg];
+				void ask("diagnostic", toHistory(next), misconceptions);
+				return next;
+			});
+		}, 0);
+	}
+
+	// ---- Event handlers ----
 
 	function handleType(e: React.FormEvent) {
 		e.preventDefault();
@@ -117,25 +184,21 @@ export function LessonView({ section }: { section: APCalcBCSection }) {
 		const answer = pending;
 		setPending(null);
 
-		idSeq += 1;
 		const studentMsg: Message = {
-			id: idSeq,
+			id: nextId(),
 			role: "student",
 			text: answer,
 			math: [],
 		};
 
 		const currentPhase = phase;
-		const currentMisconceptions = misconceptions;
+		const currentGaps = misconceptions;
 		setMessages((prev) => {
 			const next = [...prev, studentMsg];
-			const history: HistoryEntry[] = next.map((m) => ({
-				role: m.role,
-				content: m.text,
-			}));
-			queueMicrotask(() => ask(currentPhase, history, currentMisconceptions));
+			void ask(currentPhase, toHistory(next), currentGaps);
 			return next;
 		});
+		scrollToBottom(bottomRef);
 	}
 
 	function handleEdit() {
@@ -144,12 +207,51 @@ export function LessonView({ section }: { section: APCalcBCSection }) {
 		setPending(null);
 	}
 
+	function handleStartLesson() {
+		setPhase("teaching");
+		void ask("teaching", toHistory(messages), misconceptions);
+	}
+
+	// ---- Derived state ----
+
 	const latestMath =
 		[...messages].reverse().find((m) => m.math.length > 0)?.math ?? [];
 
+	// ---- ELO reveal screen ----
+
+	if (phase === "elo-reveal" && eloScore !== null) {
+		return (
+			<div className="flex min-h-[60vh] flex-col items-center justify-center gap-6 px-6">
+				<p className="font-medium text-slate-400 text-sm">
+					Diagnostic Complete
+				</p>
+				<div className="flex flex-col items-center gap-2">
+					<p className="font-bold text-6xl text-violet-300">{eloScore}</p>
+					<p className="font-semibold text-lg text-slate-200">
+						{eloLabel(eloScore)}
+					</p>
+				</div>
+				<p className="max-w-md text-center text-slate-400 text-sm">
+					Your lesson will be tailored to this level. The tutor will focus on
+					{misconceptions.length > 0
+						? ` addressing ${misconceptions.length} reasoning gap${misconceptions.length > 1 ? "s" : ""} found in the diagnostic.`
+						: " reinforcing your strengths and pushing you further."}
+				</p>
+				<button
+					className="mt-2 rounded-md bg-violet-500 px-6 py-2.5 font-semibold text-white transition hover:bg-violet-400"
+					onClick={handleStartLesson}
+					type="button"
+				>
+					Start Lesson
+				</button>
+			</div>
+		);
+	}
+
+	// ---- Main UI ----
+
 	return (
 		<div className="flex h-[calc(100vh-3rem)] flex-col">
-			{/* Visual teaching panel */}
 			{latestMath.length > 0 && (
 				<div className="flex flex-wrap items-center gap-4 border-slate-800 border-b bg-slate-900/70 px-6 py-4">
 					{latestMath.map((latex, i) => (
@@ -158,7 +260,6 @@ export function LessonView({ section }: { section: APCalcBCSection }) {
 				</div>
 			)}
 
-			{/* Messages */}
 			<div className="flex-1 overflow-y-auto px-6 py-4">
 				<div className="mx-auto flex max-w-3xl flex-col gap-4">
 					<div className="flex items-center gap-2">
@@ -166,6 +267,13 @@ export function LessonView({ section }: { section: APCalcBCSection }) {
 							{phase === "diagnostic" ? "Diagnostic" : "Lesson"}
 						</span>
 						<span className="text-slate-400 text-xs">{section.title}</span>
+						{phase === "diagnostic" && (
+							<span
+								className={`ml-auto font-mono text-xs ${secondsLeft <= 60 ? "text-red-400" : "text-slate-400"}`}
+							>
+								{formatTime(secondsLeft)}
+							</span>
+						)}
 					</div>
 
 					{messages.map((msg) => (
@@ -223,7 +331,6 @@ export function LessonView({ section }: { section: APCalcBCSection }) {
 				</div>
 			</div>
 
-			{/* Input */}
 			<form
 				className="flex items-center gap-3 border-slate-800 border-t bg-slate-950 px-6 py-3"
 				onSubmit={handleType}
